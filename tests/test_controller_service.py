@@ -49,6 +49,18 @@ def test_service_starts_ready_downloader_once():
     assert client.started == ["req-1"]
 
 
+def test_service_deduplicates_repeated_request_id():
+    client = FakeClient({"gui_running": True, "busy": False, "ready": True})
+    service = ControllerService(_config(), clients={"douyin_downloader": client})
+    target = CommandRegistry().resolve("抖音：开始下载")
+
+    first = service.handle_action(target, "req-duplicate")
+    second = service.handle_action(target, "req-duplicate")
+
+    assert first.to_json() == second.to_json()
+    assert client.started == ["req-duplicate"]
+
+
 def test_service_rejects_missing_target_process():
     client = FakeClient({"gui_running": False, "busy": False})
     service = ControllerService(_config(), clients={"main_analyzer": client})
