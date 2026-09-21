@@ -18,6 +18,7 @@ from controller_client import ControlClient, ControlClientError
 from controller_api import ControllerApi
 from notifier import Notifier
 from report_store import ReportStore
+from task_protocol import CommandResponse
 
 load_dotenv()  # Load values from the local .env file when present.
 
@@ -218,6 +219,8 @@ class ControllerService:
     ) -> None:
         self.config = config
         self.registry = CommandRegistry()
+        self._request_cache: dict[str, CommandResponse] = {}
+        self._request_cache_lock = threading.RLock()
         self.clients = dict(clients or {
             "main_analyzer": ControlClient(
                 config.main_analyzer_url,
@@ -231,26 +234,36 @@ class ControllerService:
             ),
         })
 
-    def handle_action(self, target: ActionSpec | None, request_id: str) -> object:
+    def handle_action(self, target: ActionSpec | None, request_id: str) -> CommandResponse:
+        with self._request_cache_lock:
+            cached = self._request_cache.get(request_id)
+        if cached is not None:
+            return cached
+
+        def finish(response: CommandResponse) -> CommandResponse:
+            with self._request_cache_lock:
+                self._request_cache[request_id] = response
+            return response
+
         if target is None:
-            return self._rejected(request_id, "不支持的指令")
+            return finish(self._rejected(request_id, "不支持的指令"))
         if target.action == "system.status":
-            return self._status_response(request_id)
+            return finish(self._status_response(request_id))
 
         client = self.clients.get(target.target)
         if client is None:
-            return self._rejected(request_id, "目标程序未配置")
+            return finish(self._rejected(request_id, "目标程序未配置"))
         try:
             status = client.get_status(target)
         except ControlClientError as error:
-            return self._rejected(request_id, str(error))
+            return finish(self._rejected(request_id, str(error)))
         reason = self._refusal_reason(target, status)
         if reason:
-            return self._rejected(request_id, reason)
+            return finish(self._rejected(request_id, reason))
         try:
-            return client.start(target, request_id)
+            return finish(client.start(target, request_id))
         except ControlClientError as error:
-            return self._rejected(request_id, str(error))
+            return finish(self._rejected(request_id, str(error)))
 
     def status_text(self) -> str:
         lines = ["系统状态："]
@@ -294,8 +307,6 @@ class ControllerService:
 
     @staticmethod
     def _rejected(request_id: str, reason: str):
-        from task_protocol import CommandResponse
-
         return CommandResponse(
             request_id=request_id,
             accepted=False,
@@ -305,8 +316,6 @@ class ControllerService:
 
     @staticmethod
     def _status_response(request_id: str):
-        from task_protocol import CommandResponse
-
         return CommandResponse(
             request_id=request_id,
             accepted=True,
