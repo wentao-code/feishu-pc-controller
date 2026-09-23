@@ -10,7 +10,11 @@ from typing import Any, Mapping
 SUPPORTED_ACTIONS = frozenset(
     {
         "douyin.fetch.start",
+        "douyin.fetch.stop",
+        "douyin.fetch.status",
         "douyin.download.start",
+        "douyin.download.stop",
+        "douyin.download.status",
         "system.status",
     }
 )

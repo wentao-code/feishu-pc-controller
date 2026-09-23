@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
@@ -12,9 +13,16 @@ from task_protocol import CommandResponse
 
 
 class ControlClientError(RuntimeError):
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        system_not_started: bool = False,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.system_not_started = system_not_started
 
 
 class ControlClient:
@@ -39,10 +47,18 @@ class ControlClient:
         return payload
 
     def start(self, target: ActionSpec, request_id: str) -> CommandResponse:
+        return self._command(target, request_id, "start")
+
+    def stop(self, target: ActionSpec, request_id: str) -> CommandResponse:
+        return self._command(target, request_id, "stop")
+
+    def _command(
+        self, target: ActionSpec, request_id: str, action: str
+    ) -> CommandResponse:
         payload = self._request(
             "POST",
             "/api/v1/commands",
-            {"request_id": request_id, "action": target.target_action},
+            {"request_id": request_id, "action": action},
         )
         if not isinstance(payload, dict):
             raise ControlClientError("控制接口返回的启动结果不是对象")
@@ -83,6 +99,11 @@ class ControlClient:
             detail = self._error_detail(raw) or f"HTTP {error.code}"
             raise ControlClientError(detail, status_code=error.code) from error
         except URLError as error:
+            if self._is_connection_refused(error.reason):
+                raise ControlClientError(
+                    "系统未启动",
+                    system_not_started=True,
+                ) from error
             raise ControlClientError(f"控制接口不可用: {error.reason}") from error
         except OSError as error:
             raise ControlClientError(f"控制接口请求失败: {error}") from error
@@ -100,3 +121,13 @@ class ControlClient:
         if not isinstance(payload, dict):
             return None
         return str(payload.get("reason") or payload.get("detail") or "").strip() or None
+
+    @staticmethod
+    def _is_connection_refused(reason: object) -> bool:
+        if not isinstance(reason, OSError):
+            return False
+        return (
+            isinstance(reason, ConnectionRefusedError)
+            or reason.errno == errno.ECONNREFUSED
+            or getattr(reason, "winerror", None) == 10061
+        )

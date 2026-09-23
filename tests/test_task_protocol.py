@@ -25,6 +25,21 @@ def test_command_request_round_trips_supported_action():
     }
 
 
+@pytest.mark.parametrize(
+    "action",
+    [
+        "douyin.fetch.stop",
+        "douyin.download.stop",
+        "douyin.fetch.status",
+        "douyin.download.status",
+    ],
+)
+def test_command_request_accepts_status_and_stop_actions(action):
+    request = CommandRequest.from_json({"request_id": "req-stop", "action": action})
+
+    assert request.action == action
+
+
 def test_command_request_requires_id_and_known_action():
     with pytest.raises(ValueError, match="request_id"):
         CommandRequest.from_json({"action": "douyin.fetch.start"})

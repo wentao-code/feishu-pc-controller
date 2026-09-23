@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+from urllib.parse import urlparse
 import subprocess
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Mapping
 
@@ -16,11 +18,16 @@ from dotenv import load_dotenv
 from command_registry import ActionSpec, CommandRegistry, normalize_command
 from controller_client import ControlClient, ControlClientError
 from controller_api import ControllerApi
+from feishu_plugin_sdk.manifest import PluginManifest
+from manifest_client import ManifestClient, ManifestClientError
 from notifier import Notifier
+from plugin_registry import PluginAction, PluginRegistry, PluginSpec, legacy_plugin_specs
 from report_store import ReportStore
 from task_protocol import CommandResponse
 
 load_dotenv()  # Load values from the local .env file when present.
+
+LOGGER = logging.getLogger(__name__)
 
 SHUTDOWN_DELAY_SECONDS = 15
 STARTUP_MESSAGE = "通知助手开始工作"
@@ -40,6 +47,168 @@ class BotConfig:
     controller_port: int = 8760
     report_database_path: str = "runtime/controller-reports.db"
     control_timeout: float = 5.0
+    plugins: tuple[PluginSpec, ...] = ()
+    plugins_configured: bool = False
+
+
+@dataclass(frozen=True)
+class PluginEndpoint:
+    plugin_id: str
+    base_url: str
+    required_ready_fields: tuple[str, ...] = ("ready",)
+    required_status_values: Mapping[str, tuple[object, ...]] = field(default_factory=dict)
+    refusal_messages: Mapping[str, str] = field(default_factory=dict)
+    status_messages: Mapping[str, str] = field(default_factory=dict)
+    action_namespace: str | None = None
+
+    def __post_init__(self) -> None:
+        plugin_id = str(self.plugin_id or "").strip()
+        base_url = str(self.base_url or "").strip().rstrip("/")
+        if not plugin_id:
+            raise ValueError("plugin endpoint id is required")
+        if not base_url:
+            raise ValueError("plugin endpoint url is required")
+        parsed_url = urlparse(base_url)
+        if parsed_url.scheme not in {"http", "https"} or parsed_url.hostname not in {
+            "127.0.0.1",
+            "localhost",
+            "::1",
+        }:
+            raise ValueError("plugin endpoint url must use a loopback host")
+        object.__setattr__(self, "plugin_id", plugin_id)
+        object.__setattr__(self, "base_url", base_url)
+        object.__setattr__(
+            self,
+            "required_ready_fields",
+            tuple(str(value).strip() for value in self.required_ready_fields if str(value).strip()),
+        )
+        object.__setattr__(
+            self,
+            "required_status_values",
+            {str(key): tuple(values) for key, values in self.required_status_values.items()},
+        )
+        object.__setattr__(
+            self,
+            "refusal_messages",
+            {str(key): str(value) for key, value in self.refusal_messages.items()},
+        )
+        object.__setattr__(
+            self,
+            "status_messages",
+            {str(key): str(value) for key, value in self.status_messages.items()},
+        )
+
+    def policy(self) -> dict[str, object]:
+        return {
+            "required_ready_fields": self.required_ready_fields,
+            "required_status_values": self.required_status_values,
+            "refusal_messages": self.refusal_messages,
+            "status_messages": self.status_messages,
+            "action_namespace": self.action_namespace,
+        }
+
+
+def load_plugin_endpoints(raw: str) -> tuple[PluginEndpoint, ...]:
+    try:
+        payload = json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise ValueError("FEISHU_PLUGIN_ENDPOINTS_JSON must be valid JSON") from error
+    if not isinstance(payload, list):
+        raise ValueError("FEISHU_PLUGIN_ENDPOINTS_JSON must be a JSON array")
+
+    endpoints: list[PluginEndpoint] = []
+    seen: set[str] = set()
+    for item in payload:
+        if not isinstance(item, Mapping):
+            raise ValueError("plugin endpoint must be an object")
+        plugin_id = str(item.get("id") or item.get("plugin_id") or "").strip()
+        base_url = str(item.get("url") or item.get("base_url") or "").strip()
+        if not plugin_id:
+            raise ValueError("plugin endpoint id is required")
+        if not base_url:
+            raise ValueError("plugin endpoint url is required")
+        if plugin_id in seen:
+            raise ValueError(f"duplicate plugin endpoint: {plugin_id}")
+        seen.add(plugin_id)
+
+        required_values = item.get("required_status_values") or {}
+        if not isinstance(required_values, Mapping):
+            raise ValueError("plugin endpoint required_status_values must be an object")
+        endpoints.append(
+            PluginEndpoint(
+                plugin_id=plugin_id,
+                base_url=base_url,
+                required_ready_fields=tuple(
+                    item.get("required_ready_fields") or ("ready",)
+                ),
+                required_status_values={
+                    str(key): tuple(value) if isinstance(value, (list, tuple)) else (value,)
+                    for key, value in required_values.items()
+                },
+                refusal_messages=dict(item.get("refusal_messages") or {}),
+                status_messages=dict(item.get("status_messages") or {}),
+                action_namespace=item.get("action_namespace"),
+            )
+        )
+    return tuple(endpoints)
+
+
+def discover_plugins(
+    endpoints: tuple[PluginEndpoint, ...],
+    control_token: str,
+    *,
+    timeout: float,
+) -> tuple[PluginSpec, ...]:
+    discovered: list[PluginSpec] = []
+    for endpoint in endpoints:
+        try:
+            manifest = ManifestClient(
+                endpoint.base_url,
+                control_token,
+                timeout=timeout,
+            ).fetch()
+            if manifest.plugin_id != endpoint.plugin_id:
+                raise ValueError(
+                    f"Manifest plugin_id {manifest.plugin_id!r} does not match "
+                    f"configured id {endpoint.plugin_id!r}"
+                )
+            policy = endpoint.policy()
+            if manifest.integration.get("bound") is False:
+                required_status_values = dict(policy["required_status_values"])
+                required_status_values.setdefault("control_bound", (True,))
+                policy["required_status_values"] = required_status_values
+                integration_message = str(
+                    manifest.integration.get("message")
+                    or f"{manifest.label}尚未绑定业务入口"
+                )
+                refusal_messages = dict(policy["refusal_messages"])
+                refusal_messages.setdefault("control_bound", integration_message)
+                policy["refusal_messages"] = refusal_messages
+                status_messages = dict(policy["status_messages"])
+                status_messages.setdefault("control_bound", integration_message)
+                policy["status_messages"] = status_messages
+            discovered.append(
+                PluginSpec.from_manifest(manifest, endpoint.base_url, **policy)
+            )
+        except (ManifestClientError, TypeError, ValueError) as error:
+            LOGGER.warning("[插件发现失败] %s: %s", endpoint.plugin_id, error)
+            label = endpoint.plugin_id.replace("_", " ").title()
+            discovered.append(
+                PluginSpec(
+                    plugin_id=endpoint.plugin_id,
+                    label=label,
+                    base_url=endpoint.base_url,
+                    actions=(
+                        PluginAction(
+                            "status",
+                            "查看状态",
+                            (f"{label}：状态", f"{endpoint.plugin_id} status"),
+                        ),
+                    ),
+                    action_namespace=endpoint.action_namespace,
+                )
+            )
+    return tuple(discovered)
 
 
 def load_config(environ: Mapping[str, str] | None = None) -> BotConfig:
@@ -49,6 +218,7 @@ def load_config(environ: Mapping[str, str] | None = None) -> BotConfig:
         "FEISHU_APP_ID",
         "FEISHU_APP_SECRET",
         "FEISHU_OWNER_OPEN_ID",
+        "FEISHU_CONTROL_TOKEN",
     )
     missing = [name for name in names if not values.get(name, "").strip()]
     if missing:
@@ -57,6 +227,33 @@ def load_config(environ: Mapping[str, str] | None = None) -> BotConfig:
             + ", ".join(missing)
             + "。请在 .env 或系统环境变量中配置。"
         )
+
+    raw_endpoints = values.get("FEISHU_PLUGIN_ENDPOINTS_JSON", "").strip()
+    raw_plugins = values.get("FEISHU_PLUGINS_JSON", "").strip()
+    plugins: tuple[PluginSpec, ...] = ()
+    plugins_configured = False
+    if raw_endpoints:
+        endpoints = load_plugin_endpoints(raw_endpoints)
+        discovered_plugins = discover_plugins(
+            endpoints,
+            values["FEISHU_CONTROL_TOKEN"].strip(),
+            timeout=float(values.get("FEISHU_CONTROL_TIMEOUT", "5")),
+        )
+        legacy_plugins = legacy_plugin_specs(
+            values.get("FEISHU_MAIN_ANALYZER_URL", "http://127.0.0.1:8761").strip(),
+            values.get("FEISHU_DOUYIN_DOWNLOADER_URL", "http://127.0.0.1:8762").strip(),
+        )
+        discovered_by_id = {plugin.plugin_id: plugin for plugin in discovered_plugins}
+        plugins = tuple(
+            discovered_by_id.pop(plugin.plugin_id, plugin) for plugin in legacy_plugins
+        ) + tuple(discovered_by_id.values())
+        plugins_configured = True
+    elif raw_plugins:
+        try:
+            plugins = tuple(PluginRegistry.from_json(raw_plugins))
+        except ValueError as error:
+            raise ValueError(str(error)) from error
+        plugins_configured = True
 
     return BotConfig(
         app_id=values["FEISHU_APP_ID"].strip(),
@@ -75,6 +272,8 @@ def load_config(environ: Mapping[str, str] | None = None) -> BotConfig:
             "FEISHU_REPORT_DATABASE_PATH", "runtime/controller-reports.db"
         ).strip(),
         control_timeout=float(values.get("FEISHU_CONTROL_TIMEOUT", "5")),
+        plugins=plugins,
+        plugins_configured=plugins_configured,
     )
 
 
@@ -90,25 +289,32 @@ def command_for_message(text: str) -> str:
     if normalized in {"状态", "status"}:
         return "status"
     action = normalize_command(text)
-    if action == "douyin.fetch.start":
-        return "douyin_fetch_start"
-    if action == "douyin.download.start":
-        return "douyin_download_start"
+    command_names = {
+        "douyin.fetch.start": "douyin_fetch_start",
+        "douyin.fetch.stop": "douyin_fetch_stop",
+        "douyin.fetch.status": "douyin_fetch_status",
+        "douyin.download.start": "douyin_download_start",
+        "douyin.download.stop": "douyin_download_stop",
+        "douyin.download.status": "douyin_download_status",
+    }
+    if action in command_names:
+        return command_names[action]
     return "echo"
 
 
-def command_help_text() -> str:
+def command_help_text(registry: CommandRegistry | None = None) -> str:
     """Return the available commands and their expected replies."""
-    return (
+    lines = [
         "可用指令：\n"
-        "1. 状态 / status：回复“机器人运行正常。”\n"
+        "1. 状态 / status：查看所有已接入系统的运行状态\n"
         "2. 关机 / shutdown / 关闭电脑：回复“收到关机指令，15秒后关机。”\n"
         "3. 取消关机 / cancel / cancel shutdown：回复“已取消关机任务。”\n"
         "4. 指令集合 / 帮助 / help / commands：显示本指令列表\n"
-        "5. 抖音：开始运行：按主程序锁定配置开始抓取\n"
-        "6. 抖音：开始下载：按下载器当前设置开始下载\n"
-        "7. 其他文本：原样回复“收到指令：你的内容”"
-    )
+    ]
+    dynamic = (registry or CommandRegistry()).help_text().splitlines()[1:]
+    lines.extend(f"{index}. {line}" for index, line in enumerate(dynamic, start=5))
+    lines.append("未知或无效指令：回复完整指令集，不执行任何操作")
+    return "\n".join(lines)
 
 
 def create_feishu_client(config: BotConfig):
@@ -218,91 +424,178 @@ class ControllerService:
         clients: Mapping[str, ControlClient] | None = None,
     ) -> None:
         self.config = config
-        self.registry = CommandRegistry()
+        plugin_specs = (
+            config.plugins
+            if config.plugins_configured
+            else config.plugins
+            or legacy_plugin_specs(config.main_analyzer_url, config.downloader_url)
+        )
+        self.registry = CommandRegistry(PluginRegistry(plugin_specs))
         self._request_cache: dict[str, CommandResponse] = {}
+        self._request_inflight: dict[str, threading.Event] = {}
         self._request_cache_lock = threading.RLock()
-        self.clients = dict(clients or {
-            "main_analyzer": ControlClient(
-                config.main_analyzer_url,
-                config.control_token,
-                timeout=config.control_timeout,
-            ),
-            "douyin_downloader": ControlClient(
-                config.downloader_url,
-                config.control_token,
-                timeout=config.control_timeout,
-            ),
-        })
+        self.clients = dict(
+            clients
+            or {
+                plugin.plugin_id: ControlClient(
+                    plugin.base_url,
+                    config.control_token,
+                    timeout=config.control_timeout,
+                )
+                for plugin in self.registry.plugins
+            }
+        )
 
     def handle_action(self, target: ActionSpec | None, request_id: str) -> CommandResponse:
         with self._request_cache_lock:
             cached = self._request_cache.get(request_id)
-        if cached is not None:
-            return cached
+            if cached is not None:
+                return cached
+            inflight = self._request_inflight.get(request_id)
+            if inflight is None:
+                inflight = threading.Event()
+                self._request_inflight[request_id] = inflight
+                owner = True
+            else:
+                owner = False
 
-        def finish(response: CommandResponse) -> CommandResponse:
+        if not owner:
+            inflight.wait()
+            with self._request_cache_lock:
+                return self._request_cache[request_id]
+
+        try:
+            if target is None:
+                response = self._rejected(request_id, "不支持的指令")
+            elif target.action == "system.status":
+                response = self._status_response(request_id)
+            else:
+                client = self.clients.get(target.target)
+                if client is None:
+                    response = self._rejected(request_id, "目标程序未配置")
+                else:
+                    try:
+                        status = client.get_status(target)
+                        if target.target_action == "status":
+                            response = self._plugin_status_response(target, request_id, status)
+                        else:
+                            reason = self._refusal_reason(target, status)
+                            if reason:
+                                response = self._rejected(request_id, reason)
+                            elif target.target_action == "stop":
+                                response = client.stop(target, request_id)
+                            else:
+                                response = client.start(target, request_id)
+                    except ControlClientError as error:
+                        reason = "系统未启动" if error.system_not_started else str(error)
+                        response = self._rejected(request_id, reason)
+        except Exception as error:
+            response = self._rejected(request_id, f"控制服务异常：{error}")
+        finally:
             with self._request_cache_lock:
                 self._request_cache[request_id] = response
-            return response
+                waiter = self._request_inflight.pop(request_id)
+                waiter.set()
+        return response
 
-        if target is None:
-            return finish(self._rejected(request_id, "不支持的指令"))
-        if target.action == "system.status":
-            return finish(self._status_response(request_id))
-
-        client = self.clients.get(target.target)
-        if client is None:
-            return finish(self._rejected(request_id, "目标程序未配置"))
-        try:
-            status = client.get_status(target)
-        except ControlClientError as error:
-            return finish(self._rejected(request_id, str(error)))
-        reason = self._refusal_reason(target, status)
-        if reason:
-            return finish(self._rejected(request_id, reason))
-        try:
-            return finish(client.start(target, request_id))
-        except ControlClientError as error:
-            return finish(self._rejected(request_id, str(error)))
-
-    def status_text(self) -> str:
+    def status_text(self, plugin_id: str | None = None) -> str:
         lines = ["系统状态："]
-        for target_name, label in (
-            ("main_analyzer", "主程序"),
-            ("douyin_downloader", "抖音下载程序"),
-        ):
+        plugins = tuple(
+            plugin
+            for plugin in self.registry.plugins
+            if plugin_id is None or plugin.plugin_id == plugin_id
+        )
+        if plugin_id is not None and not plugins:
+            return f"{plugin_id}：未配置"
+        for plugin in plugins:
+            target_name = plugin.plugin_id
+            label = plugin.label
             target = ActionSpec("system.status", target_name, "status", label)
-            client = self.clients.get(target_name)
+            client = self.clients.get(plugin.plugin_id)
             if client is None:
                 lines.append(f"{label}：未配置")
                 continue
             try:
                 status = client.get_status(target)
             except ControlClientError as error:
-                lines.append(f"{label}：不可用（{error}）")
+                if error.system_not_started:
+                    lines.append(f"{label}：系统未启动")
+                else:
+                    lines.append(f"{label}：不可用（{error}）")
                 continue
-            if not status.get("gui_running"):
-                lines.append(f"{label}：未运行")
-            elif status.get("busy"):
-                lines.append(f"{label}：运行中，任务 {status.get('task_id') or '未知'}")
-            elif target_name == "main_analyzer" and not status.get("config_locked"):
-                lines.append(f"{label}：未锁定配置")
-            elif target_name == "douyin_downloader" and not status.get("ready"):
-                lines.append(f"{label}：未准备好")
-            else:
-                lines.append(f"{label}：就绪")
+            lines.append(self._format_plugin_status(plugin, status))
+        if plugin_id is not None:
+            return lines[1]
         return "\n".join(lines)
 
     @staticmethod
-    def _refusal_reason(target: ActionSpec, status: Mapping[str, object]) -> str | None:
+    def _format_plugin_status(plugin: PluginSpec, status: Mapping[str, object]) -> str:
+        label = plugin.label
         if not status.get("gui_running"):
-            return "主程序未运行" if target.target == "main_analyzer" else "抖音下载程序未运行"
+            return f"{label}：未运行"
+        if status.get("task_status_known") is False:
+            return f"{label}：任务状态未知，尚未接入 GUI 任务队列"
         if status.get("busy"):
-            return "主程序当前已有任务运行中" if target.target == "main_analyzer" else "抖音下载程序当前已有任务运行中"
-        if target.target == "main_analyzer" and not status.get("config_locked"):
-            return "当前配置未锁定，请先在主程序中锁定配置"
-        if target.target == "douyin_downloader" and not status.get("ready"):
-            return "抖音下载程序当前未准备好"
+            task_title = str(status.get("task_title") or "").strip()
+            task_label = task_title or str(status.get("task_id") or "未知")
+            message = f"{label}：运行中，当前任务：{task_label}"
+            try:
+                queue_depth = max(0, int(status.get("queue_depth") or 0))
+            except (TypeError, ValueError):
+                queue_depth = 0
+            if queue_depth:
+                message += f"，另有 {queue_depth} 项排队"
+            return message
+        try:
+            queue_depth = max(0, int(status.get("queue_depth") or 0))
+        except (TypeError, ValueError):
+            queue_depth = 0
+        if queue_depth:
+            return f"{label}：当前无任务执行，另有 {queue_depth} 项等待处理"
+        return f"{label}：已启动，当前空闲"
+
+    def _plugin_status_response(
+        self,
+        target: ActionSpec,
+        request_id: str,
+        status: Mapping[str, object] | None = None,
+    ) -> CommandResponse:
+        plugin = self.registry.plugins.get(target.target)
+        client = self.clients.get(target.target)
+        if plugin is None or client is None:
+            return self._rejected(request_id, "目标程序未配置")
+        if status is None:
+            try:
+                status = client.get_status(target)
+            except ControlClientError as error:
+                return self._rejected(request_id, f"{plugin.label}状态异常：{error}")
+        return CommandResponse(
+            request_id=request_id,
+            accepted=True,
+            status="accepted",
+            message=self._format_plugin_status(plugin, status),
+        )
+
+    def _refusal_reason(self, target: ActionSpec, status: Mapping[str, object]) -> str | None:
+        plugin = self.registry.plugins.get(target.target)
+        if plugin is None:
+            return "目标程序未配置"
+        if not status.get("gui_running"):
+            return plugin.refusal_messages.get("gui_running", f"{plugin.label}未运行")
+        if target.target_action == "status":
+            return None
+        if target.target_action == "stop":
+            if not status.get("busy"):
+                return "当前没有正在运行的任务，无需停止。"
+            return None
+        if status.get("busy"):
+            return plugin.refusal_messages.get("busy", f"{plugin.label}当前已有任务运行中")
+        for field in plugin.required_ready_fields:
+            if not status.get(field):
+                return plugin.refusal_messages.get(field, f"当前状态不满足：{field}")
+        for field, allowed_values in plugin.required_status_values.items():
+            if status.get(field) not in allowed_values:
+                return plugin.refusal_messages.get(field, f"当前状态不支持：{field}")
         return None
 
     @staticmethod
@@ -350,7 +643,8 @@ def on_message_receive(
 
         command = command_for_message(text)
         if command == "help":
-            send_message_to_owner(command_help_text(), config, client)
+            registry = controller_service.registry if controller_service is not None else None
+            send_message_to_owner(command_help_text(registry), config, client)
         elif command == "shutdown":
             send_message_to_owner("收到关机指令，15秒后关机。", config, client)
             shutdown_runner()
@@ -364,13 +658,21 @@ def on_message_receive(
                 send_message_to_owner("机器人运行正常。", config, client)
             else:
                 send_message_to_owner(controller_service.status_text(), config, client)
-        elif command in {"douyin_fetch_start", "douyin_download_start"}:
+        elif command in {
+            "douyin_fetch_start",
+            "douyin_fetch_stop",
+            "douyin_download_start",
+            "douyin_download_stop",
+        }:
             if controller_service is None:
                 send_message_to_owner("控制服务尚未初始化，无法执行任务。", config, client)
                 return
-            action_text = (
-                "抖音：开始运行" if command == "douyin_fetch_start" else "抖音：开始下载"
-            )
+            action_text = {
+                "douyin_fetch_start": "抖音：开始运行",
+                "douyin_fetch_stop": "抖音：停止运行",
+                "douyin_download_start": "抖音：开始下载",
+                "douyin_download_stop": "抖音：停止下载",
+            }[command]
             target = controller_service.registry.resolve(action_text)
             request_id = str(
                 getattr(data, "event_id", None)
@@ -378,7 +680,13 @@ def on_message_receive(
                 or uuid.uuid4().hex
             )
             response = controller_service.handle_action(target, request_id)
-            if getattr(response, "accepted", False):
+            if getattr(response, "accepted", False) and target.target_action == "stop":
+                send_message_to_owner(
+                    "停止请求已提交，当前处理完成后会安全停止。",
+                    config,
+                    client,
+                )
+            elif getattr(response, "accepted", False):
                 send_message_to_owner(
                     f"已接受{action_text}，正在按当前配置启动。任务 ID：{getattr(response, 'task_id', None) or '启动中'}",
                     config,
@@ -391,7 +699,36 @@ def on_message_receive(
                     client,
                 )
         else:
-            send_message_to_owner(f"收到指令：{text}", config, client)
+            target = controller_service.registry.resolve(text) if controller_service else None
+            if controller_service is None:
+                send_message_to_owner(command_help_text(), config, client)
+            elif target is None:
+                send_message_to_owner(
+                    command_help_text(controller_service.registry),
+                    config,
+                    client,
+                )
+            elif target.action == "system.status":
+                send_message_to_owner(f"收到指令：{text}", config, client)
+            else:
+                request_id = str(
+                    getattr(data, "event_id", None)
+                    or getattr(getattr(data, "event", None), "event_id", None)
+                    or uuid.uuid4().hex
+                )
+                response = controller_service.handle_action(target, request_id)
+                if response.accepted and target.target_action == "status":
+                    message = response.message
+                elif response.accepted and target.target_action == "stop":
+                    message = "停止请求已提交，当前处理完成后会安全停止。"
+                elif response.accepted:
+                    message = (
+                        f"已接受{target.label}，正在按当前配置启动。"
+                        f"任务 ID：{response.task_id or '启动中'}"
+                    )
+                else:
+                    message = f"{target.label}已拒绝：{response.reason or '未知原因'}"
+                send_message_to_owner(message, config, client)
     except Exception as error:
         print(f"[处理消息出错] {error}")
 

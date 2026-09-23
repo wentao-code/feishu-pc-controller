@@ -53,6 +53,32 @@ def test_start_sends_bearer_token_and_target_action():
     assert response.task_id == "task-1"
 
 
+def test_stop_sends_stop_action():
+    calls = []
+
+    def opener(request, timeout):
+        calls.append((request, timeout))
+        return FakeResponse(
+            {
+                "request_id": "stop-1",
+                "accepted": True,
+                "status": "accepted",
+                "message": "已提交停止请求",
+                "task_id": "run-1",
+            }
+        )
+
+    target = CommandRegistry().resolve("抖音：停止下载")
+    client = ControlClient("http://127.0.0.1:8762", "secret", opener=opener)
+
+    response = client.stop(target, "stop-1")
+
+    request, _timeout = calls[0]
+    assert json.loads(request.data) == {"request_id": "stop-1", "action": "stop"}
+    assert response.message == "已提交停止请求"
+    assert response.task_id == "run-1"
+
+
 def test_get_status_returns_json_payload():
     def opener(_request, timeout):
         assert timeout == 5.0
