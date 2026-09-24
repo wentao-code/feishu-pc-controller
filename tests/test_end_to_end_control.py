@@ -148,14 +148,14 @@ def test_two_commands_reach_two_targets_and_report_is_idempotent(tmp_path):
             "secret",
             "owner",
             control_token="secret",
-            main_analyzer_url=f"http://127.0.0.1:{analyzer.server_address[1]}",
-            downloader_url=f"http://127.0.0.1:{downloader.server_address[1]}",
+            bilibili_hiatus_analyzer_url=f"http://127.0.0.1:{analyzer.server_address[1]}",
+            douyin_downloader_main_url=f"http://127.0.0.1:{downloader.server_address[1]}",
         )
         service = ControllerService(
             config,
             clients={
-                "main_analyzer": ControlClient(config.main_analyzer_url, "secret"),
-                "douyin_downloader": ControlClient(config.downloader_url, "secret"),
+                "bilibili-hiatus-analyzer": ControlClient(config.bilibili_hiatus_analyzer_url, "secret"),
+                "douyin-downloader-main": ControlClient(config.douyin_downloader_main_url, "secret"),
             },
         )
         registry = CommandRegistry()
@@ -170,7 +170,7 @@ def test_two_commands_reach_two_targets_and_report_is_idempotent(tmp_path):
         report = {
             "event_id": "download-1:finished",
             "task_id": "download-1",
-            "source": "douyin_downloader",
+            "source": "douyin-downloader-main",
             "task_type": "douyin_download",
             "status": "succeeded",
             "metrics": {"success": 1, "failed": 0, "skipped": 0},

@@ -75,11 +75,15 @@ try {
 $logDirectory = Join-Path $controllerRoot "runtime\logs"
 New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
 
+$stdoutLog = Join-Path $logDirectory "controller.log"
+$stderrLog = Join-Path $logDirectory "controller.log.err"
 Start-Process -FilePath $python -ArgumentList @(
     "-u",
-    (Join-Path $controllerRoot "feishu_bot.py")
-) -WorkingDirectory $controllerRoot -WindowStyle Hidden `
-    -RedirectStandardOutput (Join-Path $logDirectory "controller.log") `
-    -RedirectStandardError (Join-Path $logDirectory "controller.log.err") | Out-Null
+    (Join-Path $controllerRoot "run_feishu_bot.py"),
+    "--stdout-log",
+    $stdoutLog,
+    "--stderr-log",
+    $stderrLog
+) -WorkingDirectory $controllerRoot -WindowStyle Hidden | Out-Null
 
 Write-Host "[controller] started; target applications will not be launched."

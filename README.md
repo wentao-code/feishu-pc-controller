@@ -4,10 +4,10 @@ This process is the local Feishu control and notification gateway. It supports
 owner-only commands:
 
 ```text
-抖音：开始运行  -> main analyzer GUI
-抖音：停止运行  -> request the main analyzer to stop safely
-抖音：开始下载  -> Douyin downloader GUI
-抖音：停止下载  -> request the downloader to stop after the current video
+抖音：开始运行  -> bilibili-hiatus-analyzer
+抖音：停止运行  -> safely stop bilibili-hiatus-analyzer
+抖音：开始下载  -> douyin-downloader-main
+抖音：停止下载  -> safely stop douyin-downloader-main after the current video
 状态            -> status of every registered system
 ```
 
@@ -27,8 +27,8 @@ the two GUI processes through their Windows user/system environment:
 ```text
 FEISHU_CONTROL_TOKEN=the_same_token
 FEISHU_CONTROLLER_REPORT_URL=http://127.0.0.1:8760
-FEISHU_MAIN_ANALYZER_PORT=8761
-FEISHU_DOUYIN_DOWNLOADER_PORT=8762
+FEISHU_BILIBILI_HIATUS_ANALYZER_PORT=8761
+FEISHU_DOUYIN_DOWNLOADER_MAIN_PORT=8762
 ```
 
 The ports are loopback-only. Do not expose them through firewall port
@@ -42,7 +42,7 @@ forwarding.
    launcher; the controller monitors its endpoint and sends commands only
    while that application is available.
 3. Make `FEISHU_CONTROL_TOKEN` available to each target application's process
-   when starting it. Lock the main analyzer configuration before sending
+   when starting it. Lock the bilibili-hiatus-analyzer configuration before sending
    `抖音：开始运行`.
 
 ## Plugin SDK
@@ -55,10 +55,10 @@ same Python environment used by each plugin:
 python -m pip install -e D:\pycharm_pro\feishu-pc-controller
 ```
 
-The analyzer and downloader keep their historical `backend.remote_control`,
-`backend.report_client`, `remote_control`, and `report_client` import paths as
-compatibility wrappers. New plugins should import directly from
-`feishu_plugin_sdk`.
+`bilibili-hiatus-analyzer` and `douyin-downloader-main` keep their established
+`backend.remote_control`, `backend.report_client`, `remote_control`, and
+`report_client` import paths as compatibility wrappers. New plugins should
+import directly from `feishu_plugin_sdk`.
 
 ## Dynamic Plugin Registry
 
@@ -90,11 +90,11 @@ Configuration uses `FEISHU_PLUGIN_ENDPOINTS_JSON` to add manifest-driven
 plugins. If a discovered plugin uses the same ID as a built-in plugin, the
 discovered definition replaces that built-in entry; otherwise the built-in
 analyzer and downloader entries remain available. `FEISHU_PLUGINS_JSON` remains
-the full replacement mode for advanced static registries. When both explicit
-variables are absent, the existing `FEISHU_MAIN_ANALYZER_URL` and
-`FEISHU_DOUYIN_DOWNLOADER_URL` variables are converted into the two built-in
-registry entries. The controller creates one authenticated `ControlClient` per
-registered plugin and generates help/status output from the registry.
+the full replacement mode for advanced static registries. When both JSON
+registry variables are absent, `FEISHU_BILIBILI_HIATUS_ANALYZER_URL` and
+`FEISHU_DOUYIN_DOWNLOADER_MAIN_URL` configure the built-in plugin endpoints.
+The controller creates one authenticated `ControlClient` per registered plugin
+and generates help/status output from the registry.
 
 The controller report database is stored under `runtime/` and deduplicates
 reports by `event_id`. Feishu notification failures are retried and do not

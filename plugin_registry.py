@@ -11,6 +11,10 @@ from feishu_plugin_sdk.manifest import PluginManifest
 
 _SUPPORTED_PLUGIN_ACTIONS = frozenset({"start", "stop", "status"})
 _PLUGIN_ID = re.compile(r"^[a-z][a-z0-9_\-]{1,63}$")
+_DISPLAY_LABELS = {
+    "bilibili-hiatus-analyzer": "bilibili-hiatus-analyzer",
+    "douyin-downloader-main": "douyin-downloader-main",
+}
 
 
 def _text(value: Any, name: str) -> str:
@@ -90,7 +94,11 @@ class PluginSpec:
         if len(set(aliases)) != len(aliases):
             raise ValueError(f"plugin {plugin_id} declares duplicate command aliases")
         object.__setattr__(self, "plugin_id", plugin_id)
-        object.__setattr__(self, "label", _text(self.label, "plugin label"))
+        object.__setattr__(
+            self,
+            "label",
+            _DISPLAY_LABELS.get(plugin_id, _text(self.label, "plugin label")),
+        )
         object.__setattr__(self, "base_url", _text(self.base_url, "plugin url").rstrip("/"))
         object.__setattr__(self, "actions", actions)
         object.__setattr__(
@@ -257,20 +265,20 @@ class PluginRegistry:
         )
 
 
-def legacy_plugin_specs(
-    main_analyzer_url: str = "http://127.0.0.1:8761",
-    downloader_url: str = "http://127.0.0.1:8762",
+def builtin_plugin_specs(
+    bilibili_hiatus_analyzer_url: str = "http://127.0.0.1:8761",
+    douyin_downloader_main_url: str = "http://127.0.0.1:8762",
 ) -> tuple[PluginSpec, ...]:
-    """Build the two pre-registry plugins for backwards-compatible startup."""
+    """Build the two first-party project registrations."""
     return (
         PluginSpec(
-            plugin_id="main_analyzer",
-            label="主程序",
-            base_url=main_analyzer_url,
+            plugin_id="bilibili-hiatus-analyzer",
+            label="bilibili-hiatus-analyzer",
+            base_url=bilibili_hiatus_analyzer_url,
             actions=(
-                PluginAction("start", "抖音抓取", ("抖音：开始运行", "douyinstart", "douyinrun")),
-                PluginAction("stop", "停止抖音抓取", ("抖音：停止运行", "douyinfetchstop", "douyinstoprun", "douyinstop")),
-                PluginAction("status", "查看抖音抓取状态", ("抖音：状态", "抖音抓取：状态", "douyin fetch status")),
+                PluginAction("start", "抖音抓取", ("抖音：开始运行",)),
+                PluginAction("stop", "停止抖音抓取", ("抖音：停止运行",)),
+                PluginAction("status", "查看抖音抓取状态", ("抖音：状态",)),
             ),
             required_ready_fields=("config_locked",),
             refusal_messages={
@@ -282,13 +290,13 @@ def legacy_plugin_specs(
             action_namespace="douyin.fetch",
         ),
         PluginSpec(
-            plugin_id="douyin_downloader",
-            label="抖音下载程序",
-            base_url=downloader_url,
+            plugin_id="douyin-downloader-main",
+            label="douyin-downloader-main",
+            base_url=douyin_downloader_main_url,
             actions=(
-                PluginAction("start", "抖音视频下载", ("抖音：开始下载", "抖音视频下载", "douyindownload")),
-                PluginAction("stop", "停止抖音下载", ("抖音：停止下载", "douyindownloadstop", "douyinstopdownload")),
-                PluginAction("status", "查看抖音下载状态", ("抖音下载：状态", "抖音下载程序：状态", "douyin download status")),
+                PluginAction("start", "抖音视频下载", ("抖音：开始下载",)),
+                PluginAction("stop", "停止抖音下载", ("抖音：停止下载",)),
+                PluginAction("status", "查看抖音下载状态", ("抖音下载：状态",)),
             ),
             required_ready_fields=("ready",),
             refusal_messages={

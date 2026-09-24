@@ -34,7 +34,7 @@ def _report(event_id="event-1"):
     return {
         "event_id": event_id,
         "task_id": "task-1",
-        "source": "main_analyzer",
+        "source": "bilibili-hiatus-analyzer",
         "task_type": "douyin_fetch",
         "status": "succeeded",
         "elapsed_seconds": 12,

@@ -65,7 +65,7 @@ def test_task_report_normalizes_timestamps_and_metrics():
         {
             "event_id": "event-1",
             "task_id": "task-1",
-            "source": "main_analyzer",
+            "source": "bilibili-hiatus-analyzer",
             "task_type": "douyin_fetch",
             "status": "succeeded",
             "started_at": "2026-09-21T04:00:00+00:00",
@@ -85,7 +85,7 @@ def test_task_report_rejects_unknown_terminal_status():
             {
                 "event_id": "event-1",
                 "task_id": "task-1",
-                "source": "main_analyzer",
+                "source": "bilibili-hiatus-analyzer",
                 "task_type": "douyin_fetch",
                 "status": "finished",
             }

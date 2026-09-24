@@ -46,7 +46,7 @@ def test_feishu_start_commands_map_to_stable_commands():
 
 def test_service_rejects_analyzer_when_configuration_is_unlocked():
     client = FakeClient({"gui_running": True, "busy": False, "config_locked": False})
-    service = ControllerService(_config(), clients={"main_analyzer": client})
+    service = ControllerService(_config(), clients={"bilibili-hiatus-analyzer": client})
     target = CommandRegistry().resolve("抖音：开始运行")
 
     response = service.handle_action(target, "req-1")
@@ -58,7 +58,7 @@ def test_service_rejects_analyzer_when_configuration_is_unlocked():
 
 def test_service_starts_ready_downloader_once():
     client = FakeClient({"gui_running": True, "busy": False, "ready": True})
-    service = ControllerService(_config(), clients={"douyin_downloader": client})
+    service = ControllerService(_config(), clients={"douyin-downloader-main": client})
     target = CommandRegistry().resolve("抖音：开始下载")
 
     response = service.handle_action(target, "req-1")
@@ -69,7 +69,7 @@ def test_service_starts_ready_downloader_once():
 
 def test_service_stops_running_downloader():
     client = FakeClient({"gui_running": True, "busy": True, "ready": True})
-    service = ControllerService(_config(), clients={"douyin_downloader": client})
+    service = ControllerService(_config(), clients={"douyin-downloader-main": client})
     target = CommandRegistry().resolve("抖音：停止下载")
 
     response = service.handle_action(target, "stop-1")
@@ -81,33 +81,33 @@ def test_service_stops_running_downloader():
 
 def test_service_reads_plugin_status_without_sending_a_command():
     client = FakeClient({"gui_running": True, "busy": False, "ready": True})
-    service = ControllerService(_config(), clients={"douyin_downloader": client})
+    service = ControllerService(_config(), clients={"douyin-downloader-main": client})
     target = CommandRegistry().resolve("抖音下载：状态")
 
     response = service.handle_action(target, "status-1")
 
     assert response.accepted is True
-    assert response.message == "抖音下载程序：就绪"
+    assert response.message == "douyin-downloader-main：已启动，当前空闲"
     assert client.started == []
     assert client.stopped == []
 
 
 def test_service_status_reports_busy_without_rejecting_or_stopping():
     client = FakeClient({"gui_running": True, "busy": True, "ready": True, "task_id": "task-7"})
-    service = ControllerService(_config(), clients={"douyin_downloader": client})
+    service = ControllerService(_config(), clients={"douyin-downloader-main": client})
     target = CommandRegistry().resolve("抖音下载：状态")
 
     response = service.handle_action(target, "status-busy")
 
     assert response.accepted is True
-    assert response.message == "抖音下载程序：运行中，任务 task-7"
+    assert response.message == "douyin-downloader-main：运行中，当前任务：task-7"
     assert client.started == []
     assert client.stopped == []
 
 
 def test_service_rejects_stop_when_downloader_is_idle():
     client = FakeClient({"gui_running": True, "busy": False, "ready": True})
-    service = ControllerService(_config(), clients={"douyin_downloader": client})
+    service = ControllerService(_config(), clients={"douyin-downloader-main": client})
     target = CommandRegistry().resolve("抖音：停止下载")
 
     response = service.handle_action(target, "stop-idle")
@@ -119,7 +119,7 @@ def test_service_rejects_stop_when_downloader_is_idle():
 
 def test_service_deduplicates_repeated_request_id():
     client = FakeClient({"gui_running": True, "busy": False, "ready": True})
-    service = ControllerService(_config(), clients={"douyin_downloader": client})
+    service = ControllerService(_config(), clients={"douyin-downloader-main": client})
     target = CommandRegistry().resolve("抖音：开始下载")
 
     first = service.handle_action(target, "req-duplicate")
@@ -141,7 +141,7 @@ def test_service_deduplicates_concurrent_request_id():
             return self.response
 
     client = BlockingClient({"gui_running": True, "busy": False, "ready": True})
-    service = ControllerService(_config(), clients={"douyin_downloader": client})
+    service = ControllerService(_config(), clients={"douyin-downloader-main": client})
     target = CommandRegistry().resolve("抖音：开始下载")
     responses = []
     threads = [
@@ -166,7 +166,7 @@ def test_service_deduplicates_concurrent_request_id():
 
 def test_service_rejects_missing_target_process():
     client = FakeClient({"gui_running": False, "busy": False})
-    service = ControllerService(_config(), clients={"main_analyzer": client})
+    service = ControllerService(_config(), clients={"bilibili-hiatus-analyzer": client})
     target = CommandRegistry().resolve("抖音：开始运行")
 
     response = service.handle_action(target, "req-1")
@@ -209,4 +209,4 @@ def test_service_status_text_lists_dynamically_registered_plugins():
     config = BotConfig("app", "secret", "owner", control_token="token", plugins=(plugin,))
     service = ControllerService(config, clients={"video_tools": client})
 
-    assert service.status_text() == "系统状态：\n视频工具：就绪"
+    assert service.status_text() == "系统状态：\n视频工具：已启动，当前空闲"

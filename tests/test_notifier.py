@@ -7,7 +7,7 @@ def test_report_message_contains_summary_metrics():
         {
             "event_id": "event-1",
             "task_id": "task-1",
-            "source": "douyin_downloader",
+            "source": "douyin-downloader-main",
             "task_type": "douyin_download",
             "status": "partial",
             "elapsed_seconds": 61,
@@ -35,7 +35,7 @@ def test_notifier_retries_but_does_not_raise_when_sender_fails():
         {
             "event_id": "event-1",
             "task_id": "task-1",
-            "source": "main_analyzer",
+            "source": "bilibili-hiatus-analyzer",
             "task_type": "douyin_fetch",
             "status": "failed",
             "error": "目标程序异常",

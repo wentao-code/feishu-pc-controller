@@ -26,6 +26,8 @@ def test_load_config_reads_feishu_values_from_environment():
         "FEISHU_APP_SECRET": "test_secret",
         "FEISHU_OWNER_OPEN_ID": "ou_test_owner",
         "FEISHU_CONTROL_TOKEN": "control_token",
+        "FEISHU_BILIBILI_HIATUS_ANALYZER_URL": "http://127.0.0.1:18761",
+        "FEISHU_DOUYIN_DOWNLOADER_MAIN_URL": "http://127.0.0.1:18762",
     }
 
     config = load_config(env)
@@ -35,7 +37,27 @@ def test_load_config_reads_feishu_values_from_environment():
         app_secret="test_secret",
         owner_open_id="ou_test_owner",
         control_token="control_token",
+        bilibili_hiatus_analyzer_url="http://127.0.0.1:18761",
+        douyin_downloader_main_url="http://127.0.0.1:18762",
     )
+
+
+def test_load_config_ignores_removed_legacy_project_url_keys():
+    config = load_config({
+        "FEISHU_APP_ID": "cli_test_app",
+        "FEISHU_APP_SECRET": "test_secret",
+        "FEISHU_OWNER_OPEN_ID": "ou_test_owner",
+        "FEISHU_CONTROL_TOKEN": "control_token",
+        "FEISHU_MAIN_ANALYZER_URL": "http://127.0.0.1:9871",
+        "FEISHU_DOUYIN_DOWNLOADER_URL": "http://127.0.0.1:9872",
+    })
+
+    assert config.bilibili_hiatus_analyzer_url == "http://127.0.0.1:8761"
+    assert config.douyin_downloader_main_url == "http://127.0.0.1:8762"
+    assert [plugin.plugin_id for plugin in feishu_bot.builtin_plugin_specs()] == [
+        "bilibili-hiatus-analyzer",
+        "douyin-downloader-main",
+    ]
 
 
 def test_load_config_reports_missing_required_values():
@@ -217,8 +239,8 @@ def test_load_config_adds_discovered_plugins_without_dropping_legacy_plugins(mon
     assert len(captured) == 1
     assert captured[0][0][0].plugin_id == "offline_plugin"
     assert [plugin.plugin_id for plugin in config.plugins] == [
-        "main_analyzer",
-        "douyin_downloader",
+        "bilibili-hiatus-analyzer",
+        "douyin-downloader-main",
     ]
     assert config.plugins_configured is True
 
@@ -233,8 +255,16 @@ def test_owner_commands_are_normalized():
     assert command_for_message("帮助") == "help"
     assert command_for_message("help") == "help"
     assert command_for_message("抖音：停止运行") == "douyin_fetch_stop"
-    assert command_for_message("douyin download stop") == "douyin_download_stop"
+    assert command_for_message("douyin download stop") == "echo"
+    assert command_for_message("201") == "douyin_download_start"
     assert command_for_message("未知指令") == "echo"
+
+
+def test_global_numeric_commands_are_supported():
+    assert command_for_message("001") == "shutdown"
+    assert command_for_message("002") == "cancel_shutdown"
+    assert command_for_message("003") == "status"
+    assert command_for_message("004") == "help"
 
 
 def test_command_help_lists_commands_and_expected_replies():
@@ -248,6 +278,16 @@ def test_command_help_lists_commands_and_expected_replies():
     assert "已取消关机任务" in help_text
     assert "抖音：停止运行" in help_text
     assert "抖音：停止下载" in help_text
+    assert "001. 关机" in help_text
+    assert "002. 取消关机" in help_text
+    assert "003. 状态" in help_text
+    assert "004. 指令集合" in help_text
+    assert "101." in help_text
+    assert "103." in help_text
+    assert "201." in help_text
+    assert "203." in help_text
+    assert "bilibili-hiatus-analyzer" in help_text
+    assert "douyin-downloader-main" in help_text
 
 
 def test_command_help_lists_dynamically_registered_plugin_commands():
@@ -358,6 +398,59 @@ def test_dynamic_plugin_command_is_dispatched_without_controller_branch(monkeypa
 
     assert service.received == [("video_tools.start", "video-event")]
     assert sent == ["已接受视频处理，正在按当前配置启动。任务 ID：video-1"]
+
+
+def test_numbered_plugin_command_dispatches_to_registered_project(monkeypatch):
+    config = BotConfig("app", "secret", "ou-owner", control_token="token")
+    sent = []
+    monkeypatch.setattr(
+        feishu_bot,
+        "send_message_to_owner",
+        lambda text, config, client: sent.append(text),
+    )
+    registry = feishu_bot.CommandRegistry(
+        PluginRegistry(
+            [
+                PluginSpec(
+                    plugin_id="local_video_renamer",
+                    label="Local Video Renamer",
+                    base_url="http://127.0.0.1:9003",
+                    actions=(PluginAction("start", "开始重命名", ("重命名：开始",)),),
+                )
+            ]
+        )
+    )
+
+    class FakeService:
+        def __init__(self):
+            self.registry = registry
+            self.received = []
+
+        def handle_action(self, target, request_id):
+            self.received.append((target.target, target.target_action, request_id))
+            return CommandResponse(
+                request_id=request_id,
+                accepted=True,
+                status="accepted",
+                task_id="rename-1",
+            )
+
+    service = FakeService()
+    data = SimpleNamespace(
+        event_id="renamer-code-event",
+        event=SimpleNamespace(
+            message=SimpleNamespace(
+                message_type="text",
+                content=json.dumps({"text": "301"}),
+            ),
+            sender=SimpleNamespace(sender_id=SimpleNamespace(open_id="ou-owner")),
+        ),
+    )
+
+    on_message_receive(data, config, client=object(), controller_service=service)
+
+    assert service.received == [("local_video_renamer", "start", "renamer-code-event")]
+    assert sent == ["已接受开始重命名，正在按当前配置启动。任务 ID：rename-1"]
 
 
 def test_dynamic_plugin_status_command_replies_with_status_without_dispatch(monkeypatch):
@@ -579,7 +672,7 @@ def test_windows_launcher_uses_cmd_compatible_format():
 
     assert b"\r\n" in content
     assert b"\n" not in content.replace(b"\r\n", b"")
-    assert b'-u "%~dp0feishu_bot.py"' in content
+    assert b'start_feishu_stack.bat' in content
 
 
 def test_background_launcher_redirects_output_to_a_log():
@@ -588,8 +681,10 @@ def test_background_launcher_redirects_output_to_a_log():
 
     assert b"\r\n" in content
     assert b"\n" not in content.replace(b"\r\n", b"")
-    assert b'-u "%~dp0feishu_bot.py"' in content
-    assert b'>> "%~dp0feishu_bot.log" 2>&1' in content
+    assert b'-u "%~dp0run_feishu_bot.py"' in content
+    assert b'--stdout-log "%~dp0feishu_bot.log"' in content
+    assert b'--stderr-log "%~dp0feishu_bot.log"' in content
+    assert b'>>' not in content
 
 
 def test_autostart_scripts_register_and_remove_the_same_task():
@@ -615,20 +710,17 @@ def test_background_launcher_prefers_installed_python_path():
     assert "runtime\\python-path.txt" in launcher
 
 
-def test_unified_stack_launcher_covers_registered_processes():
+def test_unified_stack_launcher_starts_controller_without_launching_targets():
     root = Path(__file__).parents[1]
     launcher = (root / "start_feishu_stack.bat").read_bytes()
     script = (root / "start_feishu_stack.ps1").read_text(encoding="utf-8")
 
     assert b"\r\n" in launcher
     assert b"powershell.exe" in launcher.lower()
-    assert "start_feishu_bot_background.bat" in script
-    assert "start_gui.bat" in script
-    assert "run.py" in script
-    assert "quark_manager.control_server" in script
-    assert "FEISHU_MAIN_ANALYZER_ROOT" in script
-    assert "FEISHU_DOUYIN_DOWNLOADER_ROOT" in script
-    assert "FEISHU_QUARK_ROOT" in script
-    assert "NoController" in script
-    assert "Wait-LoopbackPort" in script
-    assert script.index('"quark-control"') < script.index('"controller"')
+    assert "run_feishu_bot.py" in script
+    assert "-WindowStyle Hidden" in script
+    assert "--stdout-log" in script
+    assert "--stderr-log" in script
+    assert "Target applications are monitored only" in script
+    assert "start_gui.bat" not in script
+    assert "quark_manager.control_server" not in script

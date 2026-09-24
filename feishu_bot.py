@@ -21,7 +21,7 @@ from controller_api import ControllerApi
 from feishu_plugin_sdk.manifest import PluginManifest
 from manifest_client import ManifestClient, ManifestClientError
 from notifier import Notifier
-from plugin_registry import PluginAction, PluginRegistry, PluginSpec, legacy_plugin_specs
+from plugin_registry import PluginAction, PluginRegistry, PluginSpec, builtin_plugin_specs
 from report_store import ReportStore
 from task_protocol import CommandResponse
 
@@ -41,8 +41,8 @@ class BotConfig:
     app_secret: str
     owner_open_id: str
     control_token: str = ""
-    main_analyzer_url: str = "http://127.0.0.1:8761"
-    downloader_url: str = "http://127.0.0.1:8762"
+    bilibili_hiatus_analyzer_url: str = "http://127.0.0.1:8761"
+    douyin_downloader_main_url: str = "http://127.0.0.1:8762"
     controller_host: str = "127.0.0.1"
     controller_port: int = 8760
     report_database_path: str = "runtime/controller-reports.db"
@@ -239,13 +239,17 @@ def load_config(environ: Mapping[str, str] | None = None) -> BotConfig:
             values["FEISHU_CONTROL_TOKEN"].strip(),
             timeout=float(values.get("FEISHU_CONTROL_TIMEOUT", "5")),
         )
-        legacy_plugins = legacy_plugin_specs(
-            values.get("FEISHU_MAIN_ANALYZER_URL", "http://127.0.0.1:8761").strip(),
-            values.get("FEISHU_DOUYIN_DOWNLOADER_URL", "http://127.0.0.1:8762").strip(),
+        builtins = builtin_plugin_specs(
+            values.get(
+                "FEISHU_BILIBILI_HIATUS_ANALYZER_URL", "http://127.0.0.1:8761"
+            ).strip(),
+            values.get(
+                "FEISHU_DOUYIN_DOWNLOADER_MAIN_URL", "http://127.0.0.1:8762"
+            ).strip(),
         )
         discovered_by_id = {plugin.plugin_id: plugin for plugin in discovered_plugins}
         plugins = tuple(
-            discovered_by_id.pop(plugin.plugin_id, plugin) for plugin in legacy_plugins
+            discovered_by_id.pop(plugin.plugin_id, plugin) for plugin in builtins
         ) + tuple(discovered_by_id.values())
         plugins_configured = True
     elif raw_plugins:
@@ -260,11 +264,11 @@ def load_config(environ: Mapping[str, str] | None = None) -> BotConfig:
         app_secret=values["FEISHU_APP_SECRET"].strip(),
         owner_open_id=values["FEISHU_OWNER_OPEN_ID"].strip(),
         control_token=values.get("FEISHU_CONTROL_TOKEN", "").strip(),
-        main_analyzer_url=values.get(
-            "FEISHU_MAIN_ANALYZER_URL", "http://127.0.0.1:8761"
+        bilibili_hiatus_analyzer_url=values.get(
+            "FEISHU_BILIBILI_HIATUS_ANALYZER_URL", "http://127.0.0.1:8761"
         ).strip(),
-        downloader_url=values.get(
-            "FEISHU_DOUYIN_DOWNLOADER_URL", "http://127.0.0.1:8762"
+        douyin_downloader_main_url=values.get(
+            "FEISHU_DOUYIN_DOWNLOADER_MAIN_URL", "http://127.0.0.1:8762"
         ).strip(),
         controller_host=values.get("FEISHU_CONTROLLER_HOST", "127.0.0.1").strip(),
         controller_port=int(values.get("FEISHU_CONTROLLER_PORT", "8760")),
@@ -280,6 +284,14 @@ def load_config(environ: Mapping[str, str] | None = None) -> BotConfig:
 def command_for_message(text: str) -> str:
     """Normalize a message into a supported command name."""
     normalized = text.strip().lower()
+    numeric_commands = {
+        "001": "shutdown",
+        "002": "cancel_shutdown",
+        "003": "status",
+        "004": "help",
+    }
+    if normalized in numeric_commands:
+        return numeric_commands[normalized]
     if normalized in {"关机", "shutdown", "关闭电脑"}:
         return "shutdown"
     if normalized in {"取消关机", "cancel", "cancel shutdown"}:
@@ -306,13 +318,13 @@ def command_help_text(registry: CommandRegistry | None = None) -> str:
     """Return the available commands and their expected replies."""
     lines = [
         "可用指令：\n"
-        "1. 状态 / status：查看所有已接入系统的运行状态\n"
-        "2. 关机 / shutdown / 关闭电脑：回复“收到关机指令，15秒后关机。”\n"
-        "3. 取消关机 / cancel / cancel shutdown：回复“已取消关机任务。”\n"
-        "4. 指令集合 / 帮助 / help / commands：显示本指令列表\n"
+        "001. 关机 / shutdown / 关闭电脑：回复“收到关机指令，15秒后关机。”\n"
+        "002. 取消关机 / cancel / cancel shutdown：回复“已取消关机任务。”\n"
+        "003. 状态 / status：查看所有已接入系统的运行状态\n"
+        "004. 指令集合 / 帮助 / help / commands：显示本指令列表\n"
     ]
     dynamic = (registry or CommandRegistry()).help_text().splitlines()[1:]
-    lines.extend(f"{index}. {line}" for index, line in enumerate(dynamic, start=5))
+    lines.extend(dynamic)
     lines.append("未知或无效指令：回复完整指令集，不执行任何操作")
     return "\n".join(lines)
 
@@ -428,7 +440,10 @@ class ControllerService:
             config.plugins
             if config.plugins_configured
             else config.plugins
-            or legacy_plugin_specs(config.main_analyzer_url, config.downloader_url)
+            or builtin_plugin_specs(
+                config.bilibili_hiatus_analyzer_url,
+                config.douyin_downloader_main_url,
+            )
         )
         self.registry = CommandRegistry(PluginRegistry(plugin_specs))
         self._request_cache: dict[str, CommandResponse] = {}
