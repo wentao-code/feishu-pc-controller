@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections import OrderedDict
 from urllib.parse import urlparse
 import subprocess
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,6 +17,7 @@ from typing import Callable, Mapping
 
 from dotenv import load_dotenv
 
+from application_lifecycle import ApplicationLifecycleManager
 from command_registry import ActionSpec, CommandRegistry, normalize_command
 from controller_client import ControlClient, ControlClientError
 from controller_api import ControllerApi
@@ -35,6 +38,41 @@ _shutdown_timer: threading.Timer | None = None
 _shutdown_lock = threading.Lock()
 
 
+class EventDeduplicator:
+    """Keep recently handled Feishu event IDs to suppress redeliveries."""
+
+    def __init__(self, ttl_seconds: float = 24 * 60 * 60, max_events: int = 10_000):
+        self.ttl_seconds = max(0.0, float(ttl_seconds))
+        self.max_events = max(1, int(max_events))
+        self._seen: OrderedDict[str, float] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def is_duplicate(self, event_id: str | None) -> bool:
+        key = str(event_id or "").strip()
+        if not key:
+            return False
+
+        now = time.monotonic()
+        with self._lock:
+            while self._seen:
+                oldest_id, seen_at = next(iter(self._seen.items()))
+                if now - seen_at <= self.ttl_seconds:
+                    break
+                self._seen.pop(oldest_id)
+
+            seen_at = self._seen.get(key)
+            if seen_at is not None and now - seen_at <= self.ttl_seconds:
+                return True
+
+            self._seen[key] = now
+            while len(self._seen) > self.max_events:
+                self._seen.popitem(last=False)
+            return False
+
+
+_event_deduplicator = EventDeduplicator()
+
+
 @dataclass(frozen=True)
 class BotConfig:
     app_id: str
@@ -47,6 +85,11 @@ class BotConfig:
     controller_port: int = 8760
     report_database_path: str = "runtime/controller-reports.db"
     control_timeout: float = 5.0
+    local_video_renamer_url: str = "http://127.0.0.1:8763"
+    quark_control_url: str = "http://127.0.0.1:8764"
+    quark_web_url: str = "http://127.0.0.1:8501"
+    quark_control_port: int = 8764
+    project_roots: Mapping[str, Path] = field(default_factory=dict)
     plugins: tuple[PluginSpec, ...] = ()
     plugins_configured: bool = False
 
@@ -228,6 +271,12 @@ def load_config(environ: Mapping[str, str] | None = None) -> BotConfig:
             + "。请在 .env 或系统环境变量中配置。"
         )
 
+    controller_root = Path(__file__).resolve().parent
+
+    def project_root(name: str, default: str) -> Path:
+        configured = Path(values.get(name, default).strip()).expanduser()
+        return (configured if configured.is_absolute() else controller_root / configured).resolve()
+
     raw_endpoints = values.get("FEISHU_PLUGIN_ENDPOINTS_JSON", "").strip()
     raw_plugins = values.get("FEISHU_PLUGINS_JSON", "").strip()
     plugins: tuple[PluginSpec, ...] = ()
@@ -276,6 +325,31 @@ def load_config(environ: Mapping[str, str] | None = None) -> BotConfig:
             "FEISHU_REPORT_DATABASE_PATH", "runtime/controller-reports.db"
         ).strip(),
         control_timeout=float(values.get("FEISHU_CONTROL_TIMEOUT", "5")),
+        local_video_renamer_url=values.get(
+            "FEISHU_LOCAL_VIDEO_RENAMER_URL",
+            f"http://127.0.0.1:{values.get('FEISHU_LOCAL_VIDEO_RENAMER_PORT', '8763')}",
+        ).strip(),
+        quark_control_url=values.get(
+            "FEISHU_QUARK_CONTROL_URL",
+            f"http://127.0.0.1:{values.get('QUARK_CONTROL_PORT', '8764')}",
+        ).strip(),
+        quark_web_url=values.get("FEISHU_QUARK_WEB_URL", "http://127.0.0.1:8501").strip(),
+        quark_control_port=int(values.get("QUARK_CONTROL_PORT", "8764")),
+        project_roots={
+            "bilibili-hiatus-analyzer": project_root(
+                "FEISHU_BILIBILI_HIATUS_ANALYZER_ROOT", "../bilibili-hiatus-analyzer"
+            ),
+            "douyin-downloader-main": project_root(
+                "FEISHU_DOUYIN_DOWNLOADER_MAIN_ROOT",
+                "../bilibili-hiatus-analyzer/douyin-downloader-main",
+            ),
+            "local_video_renamer": project_root(
+                "FEISHU_LOCAL_VIDEO_RENAMER_ROOT", "../Local-Video-Renamer/code"
+            ),
+            "quark_file_management": project_root(
+                "FEISHU_QUARK_ROOT", "../Quark-File-Management"
+            ),
+        },
         plugins=plugins,
         plugins_configured=plugins_configured,
     )
@@ -308,6 +382,8 @@ def command_for_message(text: str) -> str:
         "douyin.download.start": "douyin_download_start",
         "douyin.download.stop": "douyin_download_stop",
         "douyin.download.status": "douyin_download_status",
+        "application.launch": "application_launch",
+        "application.close": "application_close",
     }
     if action in command_names:
         return command_names[action]
@@ -434,6 +510,7 @@ class ControllerService:
         config: BotConfig,
         *,
         clients: Mapping[str, ControlClient] | None = None,
+        lifecycle_manager: ApplicationLifecycleManager | None = None,
     ) -> None:
         self.config = config
         plugin_specs = (
@@ -449,16 +526,36 @@ class ControllerService:
         self._request_cache: dict[str, CommandResponse] = {}
         self._request_inflight: dict[str, threading.Event] = {}
         self._request_cache_lock = threading.RLock()
-        self.clients = dict(
-            clients
-            or {
+        self.clients = dict(clients or {})
+        if clients is None:
+            self.clients.update(
+                {
                 plugin.plugin_id: ControlClient(
                     plugin.base_url,
                     config.control_token,
                     timeout=config.control_timeout,
                 )
                 for plugin in self.registry.plugins
-            }
+                }
+            )
+        lifecycle_urls = {
+            "bilibili-hiatus-analyzer": config.bilibili_hiatus_analyzer_url,
+            "douyin-downloader-main": config.douyin_downloader_main_url,
+            "local_video_renamer": config.local_video_renamer_url,
+            "quark_file_management": config.quark_control_url,
+        }
+        for plugin_id, base_url in lifecycle_urls.items():
+            self.clients.setdefault(
+                plugin_id,
+                ControlClient(base_url, config.control_token, timeout=config.control_timeout),
+            )
+        self.lifecycle_manager = lifecycle_manager or ApplicationLifecycleManager(
+            project_roots=config.project_roots,
+            clients=self.clients,
+            control_token=config.control_token,
+            quark_web_url=config.quark_web_url,
+            quark_control_port=config.quark_control_port,
+            startup_timeout=config.control_timeout * 4,
         )
 
     def handle_action(self, target: ActionSpec | None, request_id: str) -> CommandResponse:
@@ -484,6 +581,10 @@ class ControllerService:
                 response = self._rejected(request_id, "不支持的指令")
             elif target.action == "system.status":
                 response = self._status_response(request_id)
+            elif target.action == "application.launch":
+                response = self.lifecycle_manager.start(target.target, request_id)
+            elif target.action == "application.close":
+                response = self.lifecycle_manager.close(target.target, request_id)
             else:
                 client = self.clients.get(target.target)
                 if client is None:
@@ -638,6 +739,7 @@ def on_message_receive(
     client=None,
     shutdown_runner: Callable[[], None] = handle_shutdown,
     controller_service: ControllerService | None = None,
+    event_deduplicator: EventDeduplicator | None = None,
 ) -> None:
     """Handle one Feishu message event."""
     try:
@@ -648,6 +750,19 @@ def on_message_receive(
             text = content.get("text", "").strip()
         else:
             text = f"[非文本消息: {msg_type}]"
+
+        header = getattr(data, "header", None)
+        event = getattr(data, "event", None)
+        event_id = (
+            getattr(header, "event_id", None)
+            or getattr(data, "event_id", None)
+            or getattr(event, "event_id", None)
+            or getattr(message, "message_id", None)
+        )
+        deduplicator = event_deduplicator or _event_deduplicator
+        if deduplicator.is_duplicate(event_id):
+            print(f"[忽略重复事件] event_id={event_id}")
+            return
 
         sender_open_id = data.event.sender.sender_id.open_id
         print(f"[收到消息] 来自 {sender_open_id}: {text}")
@@ -736,6 +851,8 @@ def on_message_receive(
                     message = response.message
                 elif response.accepted and target.target_action == "stop":
                     message = "停止请求已提交，当前处理完成后会安全停止。"
+                elif response.accepted and target.action.startswith("application."):
+                    message = response.message or "项目生命周期请求已接受。"
                 elif response.accepted:
                     message = (
                         f"已接受{target.label}，正在按当前配置启动。"

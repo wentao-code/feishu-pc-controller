@@ -79,6 +79,30 @@ def test_stop_sends_stop_action():
     assert response.task_id == "run-1"
 
 
+def test_shutdown_sends_distinct_application_shutdown_action():
+    calls = []
+
+    def opener(request, timeout):
+        calls.append(request)
+        return FakeResponse(
+            {
+                "request_id": "close-1",
+                "accepted": True,
+                "status": "accepted",
+                "message": "关闭请求已接受",
+            }
+        )
+
+    target = CommandRegistry().resolve("104")
+    client = ControlClient("http://127.0.0.1:8761", "secret", opener=opener)
+
+    response = client.shutdown(target, "close-1")
+
+    assert json.loads(calls[0].data) == {"request_id": "close-1", "action": "shutdown"}
+    assert response.accepted is True
+    assert response.message == "关闭请求已接受"
+
+
 def test_get_status_returns_json_payload():
     def opener(_request, timeout):
         assert timeout == 5.0

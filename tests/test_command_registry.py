@@ -92,6 +92,28 @@ def test_registry_resolves_local_renamer_and_quark_codes_independent_of_order():
     assert registry.resolve("403").target_action == "status"
 
 
+def test_registry_resolves_application_lifecycle_codes_and_named_commands():
+    registry = CommandRegistry()
+    expected = {
+        "104": ("bilibili-hiatus-analyzer", "launch"),
+        "105": ("bilibili-hiatus-analyzer", "close"),
+        "204": ("douyin-downloader-main", "launch"),
+        "205": ("douyin-downloader-main", "close"),
+        "304": ("local_video_renamer", "launch"),
+        "305": ("local_video_renamer", "close"),
+        "404": ("quark_file_management", "launch"),
+        "405": ("quark_file_management", "close"),
+    }
+
+    for code, (plugin_id, operation) in expected.items():
+        resolved = registry.resolve(code)
+        assert (resolved.target, resolved.target_action) == (plugin_id, operation)
+        assert resolved.action == f"application.{operation}"
+
+    assert registry.resolve("bilibili-hiatus-analyzer：启动项目").target_action == "launch"
+    assert registry.resolve("Quark File Management：关闭项目").target_action == "close"
+
+
 def test_canonical_project_names_replace_old_ids_and_english_command_aliases():
     registry = CommandRegistry()
 
@@ -122,5 +144,19 @@ def test_help_uses_category_codes_and_canonical_project_order():
     help_text = CommandRegistry(plugins).help_text()
     numbered_lines = [line for line in help_text.splitlines() if line[:3].isdigit()]
 
-    assert [line[:3] for line in numbered_lines] == ["301", "302", "303", "401", "402", "403"]
+    assert [line[:3] for line in numbered_lines] == [
+        "104", "105", "204", "205",
+        "301", "302", "303", "304", "305",
+        "401", "402", "403", "404", "405",
+    ]
     assert "301. renamer start" in help_text
+
+
+def test_help_includes_application_lifecycle_codes_for_all_four_projects():
+    lines = CommandRegistry().help_text().splitlines()
+
+    assert [line[:3] for line in lines if line[:3].isdigit() and line[1:3] in {"04", "05"}] == [
+        "104", "105", "204", "205", "304", "305", "404", "405"
+    ]
+    assert "104. bilibili-hiatus-analyzer：启动项目" in lines
+    assert "405. Quark File Management：关闭项目" in lines

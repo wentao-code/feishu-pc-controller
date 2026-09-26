@@ -8,6 +8,10 @@ owner-only commands:
 抖音：停止运行  -> safely stop bilibili-hiatus-analyzer
 抖音：开始下载  -> douyin-downloader-main
 抖音：停止下载  -> safely stop douyin-downloader-main after the current video
+104 / 105       -> start / close bilibili-hiatus-analyzer
+204 / 205       -> start / close douyin-downloader-main
+304 / 305       -> start / close Local Video Renamer
+404 / 405       -> start / close Quark File Management Web
 状态            -> status of every registered system
 ```
 
@@ -17,6 +21,15 @@ running, the selected platform is Douyin, the configuration is locked, and no
 task is active. The downloader command is accepted only when its GUI is
 running, its settings are ready, and no task is active. Rejections are sent to
 Feishu with the reason.
+
+Lifecycle codes `104/105`, `204/205`, `304/305`, and `404/405` manage the
+applications themselves, separately from task start/stop commands. The
+controller launches fixed entrypoints from the configured project roots and
+checks readiness before reporting startup. A close request is refused while a
+task is running or queued. GUI applications use their normal close path. Quark
+commands target the Streamlit Web app started by `start_web.bat`; only a Web
+process launched by this controller can be closed remotely. An unmanaged Quark
+server is reported but never terminated.
 
 ## Configuration
 
@@ -38,9 +51,10 @@ forwarding.
 
 1. Set the shared environment variables in `.env`.
 2. Start `start_feishu_bot.bat`. It loads this project's `.env` and launches
-   only the Feishu controller. Start each target application with its own
-   launcher; the controller monitors its endpoint and sends commands only
-   while that application is available.
+   the Feishu controller. The four configured applications can be started or
+   gracefully closed on demand with lifecycle commands.
+   Use `restart_feishu_bot.bat` to restart only the controller; it verifies the
+   process listening on the controller port before stopping it.
 3. Make `FEISHU_CONTROL_TOKEN` available to each target application's process
    when starting it. Lock the bilibili-hiatus-analyzer configuration before sending
    `抖音：开始运行`.
@@ -134,12 +148,12 @@ is documented in [docs/CONTROL_PROTOCOL.md](docs/CONTROL_PROTOCOL.md).
 
 ## Controller startup and autostart
 
-`start_feishu_bot.bat` loads the controller `.env` and starts only the Feishu
-controller. It does not launch, restart, or stop the analyzer, downloader, or
-other plugins. Their status is read from their loopback control endpoints; a
-command is sent only when the endpoint is available. The Local Video Renamer
-and Quark services currently expose unbound adapters and will reject business
-commands until their GUI callbacks are connected.
+`start_feishu_bot.bat` loads the controller `.env` and starts the Feishu
+controller. It does not automatically start target applications; they can be
+started on demand with lifecycle commands. Task start/stop commands remain
+separate and continue to use each plugin's business adapter. Quark lifecycle
+controls apply to its Web frontend; Quark queue-task commands remain governed
+by the separate control-service integration state.
 
 Run `powershell -ExecutionPolicy Bypass -File .\install_autostart.ps1` once to
 register the controller-only launcher at Windows logon. Remove it with

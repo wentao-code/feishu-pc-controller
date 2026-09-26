@@ -52,6 +52,9 @@ class ControlClient:
     def stop(self, target: ActionSpec, request_id: str) -> CommandResponse:
         return self._command(target, request_id, "stop")
 
+    def shutdown(self, target: ActionSpec, request_id: str) -> CommandResponse:
+        return self._command(target, request_id, "shutdown")
+
     def _command(
         self, target: ActionSpec, request_id: str, action: str
     ) -> CommandResponse:

@@ -133,6 +133,80 @@ def test_sdk_stop_requires_busy_task_and_runs_on_draining_thread(server):
     assert callback_threads == [("stop", "stop-1", drain_thread_id)]
 
 
+def test_sdk_shutdown_requires_idle_app_and_runs_on_draining_thread(server):
+    control, snapshot, _calls = server
+    snapshot.update(mode="douyin", busy=False, queue_depth=0)
+    drain_thread_id = threading.get_ident()
+    callback_threads = []
+    control.command_handler = lambda action, request_id: callback_threads.append(
+        (action, request_id, threading.get_ident())
+    ) or {"accepted": True, "status": "accepted", "message": "关闭请求已接受"}
+
+    request = _request(
+        control,
+        "/api/v1/commands",
+        method="POST",
+        payload={"request_id": "close-1", "action": "shutdown"},
+    )
+    result = []
+    thread = threading.Thread(
+        target=lambda: result.append(json.loads(urlopen(request, timeout=2).read()))
+    )
+    thread.start()
+    assert control.wait_for_command(1)
+    assert control.drain() == 1
+    thread.join(timeout=2)
+
+    assert result == [{"accepted": True, "status": "accepted", "message": "关闭请求已接受"}]
+    assert callback_threads == [("shutdown", "close-1", drain_thread_id)]
+
+
+def test_sdk_shutdown_is_refused_when_busy_or_tasks_are_queued(server):
+    control, snapshot, calls = server
+    request = _request(
+        control,
+        "/api/v1/commands",
+        method="POST",
+        payload={"request_id": "close-busy", "action": "shutdown"},
+    )
+
+    snapshot.update(busy=True, queue_depth=0)
+    with pytest.raises(HTTPError) as busy_error:
+        urlopen(request, timeout=2)
+    assert busy_error.value.code == 409
+    assert "先结束任务" in json.loads(busy_error.value.read())['reason']
+
+    snapshot.update(busy=False, queue_depth=1)
+    queued_request = _request(
+        control,
+        "/api/v1/commands",
+        method="POST",
+        payload={"request_id": "close-queued", "action": "shutdown"},
+    )
+    with pytest.raises(HTTPError) as queued_error:
+        urlopen(queued_request, timeout=2)
+    assert queued_error.value.code == 409
+    assert calls == []
+
+
+def test_sdk_shutdown_fails_closed_when_queue_depth_is_invalid(server):
+    control, snapshot, calls = server
+    snapshot.update(busy=False, queue_depth="not-a-number")
+    request = _request(
+        control,
+        "/api/v1/commands",
+        method="POST",
+        payload={"request_id": "close-invalid-depth", "action": "shutdown"},
+    )
+
+    with pytest.raises(HTTPError) as error:
+        urlopen(request, timeout=2)
+
+    assert error.value.code == 409
+    assert "无法确认" in json.loads(error.value.read())["reason"]
+    assert calls == []
+
+
 def test_sdk_deduplicates_same_request_id(server):
     control, snapshot, calls = server
     snapshot.update(mode="douyin", busy=True)

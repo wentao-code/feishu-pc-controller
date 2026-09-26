@@ -20,6 +20,34 @@ def _elapsed_text(seconds: float | None) -> str:
 
 
 def format_report_message(report: TaskReport) -> str:
+    details = report.details
+    if details.get("alert_type") == "douyin_login_invalid":
+        aweme_id = str(details.get("aweme_id") or "").strip()
+        if details.get("alert_phase") == "detected":
+            lines = [
+                "抖音登录状态失效，下载任务已自动停止。",
+                "请在抖音浏览器中重新登录后再运行。",
+            ]
+            if aweme_id:
+                lines.append(f"触发作品：{aweme_id}")
+            return "\n".join(lines)
+
+        metrics = report.metrics
+        metrics_text = (
+            f"成功 {metrics.get('success', 0)}，"
+            f"失败 {metrics.get('failed', 0)}，"
+            f"跳过 {metrics.get('skipped', 0)}"
+        )
+        lines = [
+            "抖音登录状态失效，下载任务已停止。",
+            f"最终统计：{metrics_text}",
+            f"耗时 {_elapsed_text(report.elapsed_seconds)}",
+            "请重新登录后再运行。",
+        ]
+        if aweme_id:
+            lines.insert(1, f"触发作品：{aweme_id}")
+        return "\n".join(lines)
+
     labels = {
         "douyin_fetch": "抖音抓取",
         "douyin_download": "抖音视频下载",

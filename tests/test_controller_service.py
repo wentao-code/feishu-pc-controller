@@ -31,6 +31,19 @@ class FakeClient:
         )
 
 
+class FakeLifecycleManager:
+    def __init__(self):
+        self.calls = []
+
+    def start(self, project_id, request_id):
+        self.calls.append(("start", project_id, request_id))
+        return CommandResponse(request_id, True, "accepted", message="项目已启动。")
+
+    def close(self, project_id, request_id):
+        self.calls.append(("close", project_id, request_id))
+        return CommandResponse(request_id, True, "accepted", message="项目已关闭。")
+
+
 def _config():
     return BotConfig("app", "secret", "owner", control_token="token")
 
@@ -65,6 +78,21 @@ def test_service_starts_ready_downloader_once():
 
     assert response.accepted is True
     assert client.started == ["req-1"]
+
+
+def test_service_routes_application_lifecycle_separately_from_task_commands():
+    lifecycle = FakeLifecycleManager()
+    service = ControllerService(_config(), lifecycle_manager=lifecycle)
+
+    start = service.handle_action(CommandRegistry().resolve("104"), "app-start")
+    close = service.handle_action(CommandRegistry().resolve("405"), "app-close")
+
+    assert start.message == "项目已启动。"
+    assert close.message == "项目已关闭。"
+    assert lifecycle.calls == [
+        ("start", "bilibili-hiatus-analyzer", "app-start"),
+        ("close", "quark_file_management", "app-close"),
+    ]
 
 
 def test_service_stops_running_downloader():

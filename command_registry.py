@@ -17,7 +17,19 @@ _PLUGIN_CATEGORIES = {
     "local_video_renamer": 3,
     "quark_file_management": 4,
 }
-_ACTION_SUFFIXES = {"start": 1, "stop": 2, "status": 3}
+_PROJECT_LABELS = {
+    "bilibili-hiatus-analyzer": "bilibili-hiatus-analyzer",
+    "douyin-downloader-main": "douyin-downloader-main",
+    "local_video_renamer": "Local Video Renamer",
+    "quark_file_management": "Quark File Management",
+}
+_LIFECYCLE_ALIASES = {
+    "bilibili-hiatus-analyzer": ("bilibili-hiatus-analyzer：启动项目", "bilibili-hiatus-analyzer：关闭项目"),
+    "douyin-downloader-main": ("douyin-downloader-main：启动项目", "douyin-downloader-main：关闭项目"),
+    "local_video_renamer": ("Local Video Renamer：启动项目", "Local Video Renamer：关闭项目"),
+    "quark_file_management": ("Quark File Management：启动项目", "Quark File Management：关闭项目"),
+}
+_ACTION_SUFFIXES = {"start": 1, "stop": 2, "status": 3, "launch": 4, "close": 5}
 def _command_code(plugin_id: str, action: str) -> str | None:
     category = _PLUGIN_CATEGORIES.get(plugin_id)
     suffix = _ACTION_SUFFIXES.get(action)
@@ -62,6 +74,17 @@ class CommandRegistry:
             return ActionSpec("system.status", "all", "status", "系统状态")
         if len(normalized) == 3 and normalized.isdigit():
             category, suffix = int(normalized[0]), int(normalized[1:])
+            lifecycle_action = next(
+                (name for name in ("launch", "close") if _ACTION_SUFFIXES[name] == suffix),
+                None,
+            )
+            if lifecycle_action is not None:
+                plugin_id = next(
+                    (name for name, value in _PLUGIN_CATEGORIES.items() if value == category),
+                    None,
+                )
+                if plugin_id is not None:
+                    return self._lifecycle_spec(plugin_id, lifecycle_action)
             for plugin in self.plugins:
                 if _PLUGIN_CATEGORIES.get(plugin.plugin_id) != category:
                     continue
@@ -76,9 +99,13 @@ class CommandRegistry:
                 if action is not None:
                     return self._action_spec(plugin, action.name, action.label)
             return None
+        normalized_alias = normalize_plugin_command(command)
+        for plugin_id, aliases in _LIFECYCLE_ALIASES.items():
+            for action_name, alias in zip(("launch", "close"), aliases):
+                if normalized_alias == normalize_plugin_command(alias):
+                    return self._lifecycle_spec(plugin_id, action_name)
         resolved = self.plugins.resolve(command)
         if resolved is None:
-            normalized_alias = normalize_plugin_command(command)
             for plugin in self.plugins:
                 for action in plugin.actions:
                     if normalized_alias in {
@@ -98,12 +125,27 @@ class CommandRegistry:
             label,
         )
 
+    @staticmethod
+    def _lifecycle_spec(plugin_id: str, action_name: str) -> ActionSpec:
+        label = "启动项目" if action_name == "launch" else "关闭项目"
+        return ActionSpec(
+            f"application.{action_name}",
+            plugin_id,
+            action_name,
+            label,
+        )
+
     def action_specs(self) -> tuple[ActionSpec, ...]:
         specs = [
             self._action_spec(plugin, action.name, action.label)
             for plugin in self.plugins
             for action in plugin.actions
         ]
+        specs.extend(
+            self._lifecycle_spec(plugin_id, action_name)
+            for plugin_id in _PLUGIN_CATEGORIES
+            for action_name in ("launch", "close")
+        )
         return tuple(
             sorted(
                 specs,
@@ -120,12 +162,20 @@ class CommandRegistry:
         current_plugin_id = None
         for spec in registry.action_specs():
             plugin = registry.plugins.get(spec.target)
-            action = next(item for item in plugin.actions if item.name == spec.target_action)
-            if plugin.plugin_id != current_plugin_id:
-                lines.append(f"{plugin.label}：")
-                current_plugin_id = plugin.plugin_id
-            aliases = " / ".join(action.aliases)
-            code = _command_code(plugin.plugin_id, action.name)
+            project_label = _PROJECT_LABELS.get(spec.target, plugin.label if plugin else spec.target)
+            if spec.target != current_plugin_id:
+                lines.append(f"{project_label}：")
+                current_plugin_id = spec.target
+            if spec.action.startswith("application."):
+                action_name = spec.target_action
+                aliases = _LIFECYCLE_ALIASES[spec.target][0 if action_name == "launch" else 1]
+                action_label = None
+            else:
+                action = next(item for item in plugin.actions if item.name == spec.target_action)
+                aliases = " / ".join(action.aliases)
+                action_label = action.label
+            code = _command_code(spec.target, spec.target_action)
             prefix = f"{code}. " if code else "- "
-            lines.append(f"{prefix}{aliases}：{action.label}")
+            suffix = f"：{action_label}" if action_label else ""
+            lines.append(f"{prefix}{aliases}{suffix}")
         return "\n".join(lines)

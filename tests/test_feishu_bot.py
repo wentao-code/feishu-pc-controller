@@ -39,6 +39,12 @@ def test_load_config_reads_feishu_values_from_environment():
         control_token="control_token",
         bilibili_hiatus_analyzer_url="http://127.0.0.1:18761",
         douyin_downloader_main_url="http://127.0.0.1:18762",
+        project_roots={
+            "bilibili-hiatus-analyzer": (Path(__file__).parents[1] / ".." / "bilibili-hiatus-analyzer").resolve(),
+            "douyin-downloader-main": (Path(__file__).parents[1] / ".." / "bilibili-hiatus-analyzer" / "douyin-downloader-main").resolve(),
+            "local_video_renamer": (Path(__file__).parents[1] / ".." / "Local-Video-Renamer" / "code").resolve(),
+            "quark_file_management": (Path(__file__).parents[1] / ".." / "Quark-File-Management").resolve(),
+        },
     )
 
 
@@ -58,6 +64,28 @@ def test_load_config_ignores_removed_legacy_project_url_keys():
         "bilibili-hiatus-analyzer",
         "douyin-downloader-main",
     ]
+
+
+def test_load_config_anchors_project_roots_to_controller_not_current_directory(tmp_path):
+    config = load_config(
+        {
+            "FEISHU_APP_ID": "cli_test_app",
+            "FEISHU_APP_SECRET": "test_secret",
+            "FEISHU_OWNER_OPEN_ID": "ou_test_owner",
+            "FEISHU_CONTROL_TOKEN": "control_token",
+            "FEISHU_LOCAL_VIDEO_RENAMER_ROOT": str(tmp_path / "renamer"),
+            "FEISHU_QUARK_ROOT": "..\\Quark-File-Management",
+            "FEISHU_QUARK_WEB_URL": "http://127.0.0.1:18501",
+            "QUARK_CONTROL_PORT": "18764",
+        }
+    )
+
+    assert config.project_roots["local_video_renamer"] == (tmp_path / "renamer").resolve()
+    assert config.project_roots["quark_file_management"] == (
+        Path(__file__).parents[1] / ".." / "Quark-File-Management"
+    ).resolve()
+    assert config.quark_web_url == "http://127.0.0.1:18501"
+    assert config.quark_control_port == 18764
 
 
 def test_load_config_reports_missing_required_values():
@@ -257,6 +285,8 @@ def test_owner_commands_are_normalized():
     assert command_for_message("抖音：停止运行") == "douyin_fetch_stop"
     assert command_for_message("douyin download stop") == "echo"
     assert command_for_message("201") == "douyin_download_start"
+    assert command_for_message("104") == "application_launch"
+    assert command_for_message("Quark File Management：关闭项目") == "application_close"
     assert command_for_message("未知指令") == "echo"
 
 
@@ -286,6 +316,14 @@ def test_command_help_lists_commands_and_expected_replies():
     assert "103." in help_text
     assert "201." in help_text
     assert "203." in help_text
+    assert "104. bilibili-hiatus-analyzer：启动项目" in help_text
+    assert "105. bilibili-hiatus-analyzer：关闭项目" in help_text
+    assert "204. douyin-downloader-main：启动项目" in help_text
+    assert "205. douyin-downloader-main：关闭项目" in help_text
+    assert "304. Local Video Renamer：启动项目" in help_text
+    assert "305. Local Video Renamer：关闭项目" in help_text
+    assert "404. Quark File Management：启动项目" in help_text
+    assert "405. Quark File Management：关闭项目" in help_text
     assert "bilibili-hiatus-analyzer" in help_text
     assert "douyin-downloader-main" in help_text
 
@@ -345,6 +383,80 @@ def test_stop_command_replies_immediately_without_faking_completion(monkeypatch)
     on_message_receive(data, config, client=object(), controller_service=FakeService())
 
     assert sent == ["停止请求已提交，当前处理完成后会安全停止。"]
+
+
+def test_application_lifecycle_command_uses_normal_close_response(monkeypatch):
+    config = BotConfig("app", "secret", "ou-owner", control_token="token")
+    sent = []
+    monkeypatch.setattr(
+        feishu_bot,
+        "send_message_to_owner",
+        lambda text, config, client: sent.append(text),
+    )
+
+    class FakeService:
+        registry = feishu_bot.CommandRegistry()
+
+        def handle_action(self, target, request_id):
+            assert target.target_action == "close"
+            return CommandResponse(
+                request_id=request_id,
+                accepted=True,
+                status="accepted",
+                message="项目已关闭。",
+            )
+
+    data = SimpleNamespace(
+        event_id="app-close-event",
+        event=SimpleNamespace(
+            message=SimpleNamespace(
+                message_type="text",
+                content=json.dumps({"text": "Quark File Management：关闭项目"}),
+            ),
+            sender=SimpleNamespace(sender_id=SimpleNamespace(open_id="ou-owner")),
+        ),
+    )
+
+    on_message_receive(data, config, client=object(), controller_service=FakeService())
+
+    assert sent == ["项目已关闭。"]
+
+
+def test_duplicate_feishu_event_is_ignored(monkeypatch):
+    config = BotConfig("app", "secret", "ou-owner")
+    sent = []
+    monkeypatch.setattr(
+        feishu_bot,
+        "send_message_to_owner",
+        lambda text, config, client: sent.append(text),
+    )
+    data = SimpleNamespace(
+        header=SimpleNamespace(event_id="same-event"),
+        event=SimpleNamespace(
+            message=SimpleNamespace(
+                message_id="same-message",
+                message_type="text",
+                content=json.dumps({"text": "状态"}),
+            ),
+            sender=SimpleNamespace(sender_id=SimpleNamespace(open_id="ou-owner")),
+        ),
+    )
+    deduplicator = feishu_bot.EventDeduplicator()
+
+    on_message_receive(
+        data,
+        config,
+        client=object(),
+        event_deduplicator=deduplicator,
+    )
+    on_message_receive(
+        data,
+        config,
+        client=object(),
+        event_deduplicator=deduplicator,
+    )
+
+    assert sent == ["机器人运行正常。"]
 
 
 def test_dynamic_plugin_command_is_dispatched_without_controller_branch(monkeypatch):
@@ -722,5 +834,22 @@ def test_unified_stack_launcher_starts_controller_without_launching_targets():
     assert "--stdout-log" in script
     assert "--stderr-log" in script
     assert "Target applications are monitored only" in script
+
+
+def test_restart_launcher_verifies_controller_process_before_restarting():
+    root = Path(__file__).parents[1]
+    launcher = root / "restart_feishu_bot.bat"
+    script = (root / "restart_feishu_bot.ps1").read_text(encoding="utf-8")
+    launcher_bytes = launcher.read_bytes()
+
+    assert b"\r\n" in launcher_bytes
+    assert b"\n" not in launcher_bytes.replace(b"\r\n", b"")
+    assert b"restart_feishu_bot.ps1" in launcher_bytes
+    assert "Get-NetTCPConnection" in script
+    assert "Win32_Process" in script
+    assert "run_feishu_bot.py" in script
+    assert "Stop-Process" in script
+    assert "start_feishu_bot.bat" in script
+    assert "start_feishu_stack.bat" not in script
     assert "start_gui.bat" not in script
     assert "quark_manager.control_server" not in script

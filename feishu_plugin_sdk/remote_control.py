@@ -85,7 +85,7 @@ class _RemoteHandler(BaseHTTPRequestHandler):
             self._write_json(HTTPStatus.BAD_REQUEST, {"detail": str(error)})
             return
 
-        if action not in {"start", "stop"}:
+        if action not in {"start", "stop", "shutdown"}:
             self._write_json(HTTPStatus.BAD_REQUEST, {"detail": "unsupported action"})
             return
         reason = control.refusal_reason(action)
@@ -214,6 +214,16 @@ class RemoteControlServer:
         if action == "stop":
             if not status.get("busy"):
                 return "当前没有正在运行的任务，无需停止。"
+            return None
+        if action == "shutdown":
+            try:
+                queue_depth = int(status.get("queue_depth") or 0)
+                if queue_depth < 0:
+                    raise ValueError("queue depth cannot be negative")
+            except (TypeError, ValueError):
+                return "无法确认任务队列状态，请检查目标项目后重试。"
+            if status.get("busy") or queue_depth > 0:
+                return "当前任务正在运行或排队，请先结束任务。"
             return None
         if action != "start":
             return "unsupported action"

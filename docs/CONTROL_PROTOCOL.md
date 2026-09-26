@@ -53,9 +53,11 @@ The shared SDK provides this transport through
 }
 ```
 
-`actions[].name` is stable and limited to `start`, `stop`, and read-only
+`actions[].name` is stable and limited to task `start`, `stop`, and read-only
 `status`. Human aliases are consumed by the controller registry. A `status`
-action reads `GET /api/v1/status` and never submits a task command.
+action reads `GET /api/v1/status` and never submits a task command. Application
+lifecycle commands are controller-managed and are not declared as task manifest
+actions.
 `integration.bound=false` means the adapter is intentionally a scaffold and
 must reject start/stop commands without invoking business code.
 
@@ -79,7 +81,8 @@ Plugins may add safe, non-secret fields. The controller uses `gui_running`,
 
 ## Commands
 
-`POST /api/v1/commands` accepts only:
+`POST /api/v1/commands` accepts task actions `start` and `stop`, plus the
+distinct application action `shutdown`:
 
 ```json
 {
@@ -103,9 +106,11 @@ response is:
 
 Rejections use `accepted=false`, `status="rejected"`, and a human-readable
 `reason`. `start` requires a running, ready, idle plugin. `stop` requires a
-running task. A stop response acknowledges only that the stop request was
-accepted; the plugin must continue processing its current safe checkpoint and
-later publish a terminal `cancelled` report.
+running task. `shutdown` requires an idle GUI with no queued tasks and must
+invoke the existing window-close path on the GUI/event-loop thread. It must not
+stop or cancel a task as a side effect. A stop response acknowledges only that
+the stop request was accepted; the plugin must continue processing its current
+safe checkpoint and later publish a terminal `cancelled` report.
 
 If the GUI thread does not drain the request before the bounded command
 timeout, the server returns HTTP 504 and marks the queued command expired. An
@@ -150,6 +155,12 @@ the first report for an event and sends at most one notification for it.
 5. Add the plugin to `FEISHU_PLUGINS_JSON` in the controller environment.
 6. Test manifest discovery, readiness refusal, command delivery, timeout
    expiry, safe stop, and duplicate report submission.
+
+The controller's numbered application lifecycle commands use fixed local
+entrypoints and configured project roots. They never accept an executable,
+path, or arguments from a Feishu message. Quark lifecycle commands target the
+Streamlit Web process started by `start_web.bat`; an unmanaged Web process is
+not terminated.
 
 For runtime registration, use the controller's explicit endpoint list:
 
